@@ -1,0 +1,5 @@
+User Query,Lead Type,Extracted Details,Bot Response
+I want to buy a subscription for 50 users next month. Can someone contact me?,Hot Lead,"{'Product Interest': 'subscription', 'Team Size': '50 users', 'Budget': ' 50 ', 'Timeline': 'next month', 'Contact Request': 'Yes'}","You are referring to your existing subscription that is set to auto-cancel due to payment failure or other reasons.
+
+Yes, we offer special pricing for bulk orders. To confirm your custom quote, please reach out to our sales team at sales@company.com with your requirements for a quote on your current order."
+I forgot my password. How do I reset it?,Support Query,"{'Product Interest': 'Not mentioned', 'Team Size': 'Not mentioned', 'Budget': 'Not mentioned', 'Timeline': 'Not mentioned', 'Contact Request': 'No'}","You can reset your password by clicking 'Forgot Password' on the login page and entering your registered email address. You will then receive a link to reset your password within a few minutes. If you need further assistance, please contact our support team for help restoring access to your account."
