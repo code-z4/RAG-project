@@ -1,66 +1,125 @@
-from docx import Document
-from textwrap import wrap
 from sentence_transformers import SentenceTransformer
 import chromadb
 import requests
 import csv
 import os
-import re
+import json
 
-# Step 1: Read the Word document
-doc = Document("Customer_Service_QA_Knowledge_Base.docx")
+CHROMA_PATH = "./chroma_db"
+COLLECTION_NAME = "customer_service_qa"
+MODEL_NAME = "llama3.2:1b"
+CSV_FILE = "lead_queries.csv"
+MAX_HISTORY = 6
 
-text = ""
+conversation_history = []
 
-for para in doc.paragraphs:
-    if para.text.strip():
-        text += para.text.strip() + "\n"
 
-# This reads the Q&A tables inside the Word document
-for table in doc.tables:
-    for row in table.rows:
-        row_text = []
-        for cell in row.cells:
-            if cell.text.strip():
-                row_text.append(cell.text.strip())
-        if row_text:
-            text += " | ".join(row_text) + "\n"
-
-# Step 2: Split the text into chunks
-chunks = wrap(text, 500)
-
-print("Number of chunks created:", len(chunks))
-
-# Step 3: Convert chunks into embeddings
+# Load embedding model
 embedding_model = SentenceTransformer("all-MiniLM-L6-v2")
-embeddings = embedding_model.encode(chunks).tolist()
 
-# Step 4: Store embeddings in ChromaDB
-client = chromadb.Client()
-
-try:
-    client.delete_collection(name="customer_service_qa")
-except:
-    pass
-
-collection = client.create_collection(name="customer_service_qa")
-
-collection.add(
-    documents=chunks,
-    embeddings=embeddings,
-    ids=[f"chunk_{i}" for i in range(len(chunks))]
-)
-
-print("ChromaDB vector database created successfully.")
-print("Number of chunks stored:", collection.count())
+# Load existing persistent ChromaDB
+client = chromadb.PersistentClient(path=CHROMA_PATH)
+collection = client.get_collection(name=COLLECTION_NAME)
 
 
-# Step 5: Save lead/query details into CSV
+def call_ollama(prompt):
+    response = requests.post(
+        "http://localhost:11434/api/generate",
+        json={
+            "model": MODEL_NAME,
+            "prompt": prompt,
+            "stream": False
+        }
+    )
+
+    return response.json()["response"].strip()
+
+
+def retrieve_context(question, top_k=3):
+    question_embedding = embedding_model.encode([question]).tolist()
+
+    results = collection.query(
+        query_embeddings=question_embedding,
+        n_results=top_k
+    )
+
+    retrieved_chunks = results["documents"][0]
+    return "\n\n".join(retrieved_chunks)
+
+
+def extract_details_with_llm(user_query):
+    prompt = f"""
+You are a strict information extraction assistant.
+
+Extract details ONLY if they are explicitly mentioned in the user query.
+
+Fields:
+- Product Interest
+- Team Size
+- Budget
+- Timeline
+- Contact Request
+
+Rules:
+1. Do not guess.
+2. Do not infer.
+3. If not explicitly mentioned, return "Not mentioned".
+4. Contact Request should be "Yes" only if the user explicitly asks to be contacted, called, emailed, or requests a demo.
+5. Return ONLY valid JSON.
+6. No explanations.
+
+User Query:
+{user_query}
+
+Return JSON exactly like this:
+
+{{
+  "Product Interest": "Not mentioned",
+  "Team Size": "Not mentioned",
+  "Budget": "Not mentioned",
+  "Timeline": "Not mentioned",
+  "Contact Request": "No"
+}}
+"""
+
+    result = call_ollama(prompt)
+
+    try:
+        start = result.find("{")
+        end = result.rfind("}") + 1
+
+        json_text = result[start:end]
+
+        details = json.loads(json_text)
+
+        required_keys = [
+            "Product Interest",
+            "Team Size",
+            "Budget",
+            "Timeline",
+            "Contact Request"
+        ]
+
+        for key in required_keys:
+            if key not in details:
+                details[key] = "Not mentioned"
+
+        return details
+
+    except:
+        return {
+            "Product Interest": "Not mentioned",
+            "Team Size": "Not mentioned",
+            "Budget": "Not mentioned",
+            "Timeline": "Not mentioned",
+            "Contact Request": "No"
+        }
+
+
 def save_to_csv(user_query, lead_type, extracted_details, bot_response):
-    file_name = "lead_queries.csv"
-    file_exists = os.path.isfile(file_name)
+    file_exists = os.path.isfile(CSV_FILE)
 
-    with open(file_name, mode="a", newline="", encoding="utf-8") as file:
+    with open(CSV_FILE, mode="a", newline="", encoding="utf-8") as file:
         writer = csv.writer(file)
 
         if not file_exists:
@@ -74,129 +133,64 @@ def save_to_csv(user_query, lead_type, extracted_details, bot_response):
         writer.writerow([
             user_query,
             lead_type,
-            extracted_details,
+            json.dumps(extracted_details),
             bot_response
         ])
 
 
-# Step 6: Classify the user query
-def classify_lead(user_query):
-    query = user_query.lower()
-
-    support_keywords = [
-        "password", "refund", "return", "login", "error", "issue",
-        "problem", "track", "delivery", "cancel", "damaged",
-        "order", "payment declined", "charged twice", "app crashing"
-    ]
-
-    hot_keywords = [
-        "buy", "purchase", "pricing", "quote", "demo", "contact me",
-        "sales", "subscription", "interested in buying", "need this",
-        "book a call", "speak to sales"
-    ]
-
-    warm_keywords = [
-        "interested", "looking for", "considering", "features",
-        "compare", "more information", "tell me more", "options"
-    ]
-
-    if any(word in query for word in support_keywords):
-        return "Support Query"
-
-    if any(word in query for word in hot_keywords):
-        return "Hot Lead"
-
-    if any(word in query for word in warm_keywords):
-        return "Warm Lead"
-
-    return "Cold Lead"
+def get_conversation_memory():
+    return "\n".join(conversation_history[-MAX_HISTORY:])
 
 
-# Step 7: Extract simple lead details from the user query
-def extract_details(user_query):
-    query = user_query.lower()
+def update_memory(user_query, bot_response):
+    conversation_history.append(f"User: {user_query}")
+    conversation_history.append(f"Assistant: {bot_response}")
 
-    details = {
-        "Product Interest": "Not mentioned",
-        "Team Size": "Not mentioned",
-        "Budget": "Not mentioned",
-        "Timeline": "Not mentioned",
-        "Contact Request": "No"
-    }
-
-    # Product interest
-    product_keywords = ["subscription", "software", "app", "product", "service", "plan"]
-    for word in product_keywords:
-        if word in query:
-            details["Product Interest"] = word
-            break
-
-    # Team size / number of users
-    team_match = re.search(r"(\d+)\s*(users|employees|people|staff|members|licenses)", query)
-    if team_match:
-        details["Team Size"] = team_match.group(0)
-
-    # Budget
-    budget_match = re.search(r"(\$|aed|dhs|£|gbp)?\s?\d+[,\d]*(\s?(per month|monthly|budget)?)", query)
-    if budget_match:
-        details["Budget"] = budget_match.group(0)
-
-    # Timeline
-    timelines = ["today", "this week", "next week", "this month", "next month", "as soon as possible", "asap"]
-    for time in timelines:
-        if time in query:
-            details["Timeline"] = time
-            break
-
-    # Contact request
-    contact_keywords = ["contact me", "call me", "email me", "speak to sales", "book a call", "schedule a demo"]
-    if any(word in query for word in contact_keywords):
-        details["Contact Request"] = "Yes"
-
-    return details
+    while len(conversation_history) > MAX_HISTORY:
+        conversation_history.pop(0)
 
 
-# Step 8: Ask the chatbot using RAG + Ollama
-def ask_chatbot(question):
-    question_embedding = embedding_model.encode([question]).tolist()
-
-    results = collection.query(
-        query_embeddings=question_embedding,
-        n_results=3
-    )
-
-    retrieved_chunks = results["documents"][0]
-    context = "\n\n".join(retrieved_chunks)
+def ask_chatbot(user_query):
+    context = retrieve_context(user_query)
+    memory = get_conversation_memory()
 
     prompt = f"""
-You are a helpful customer service assistant.
+You are a helpful customer service and sales assistant.
 
-Use only the information from the context below to answer the user's question.
-If the answer is not available in the context, say that you do not have enough information.
+Use the retrieved context to answer the user's question.
+Also consider the recent conversation history if it is useful.
+If the answer is not available in the context, say you do not have enough information.
 
-Context:
+Conversation History:
+{memory}
+
+Retrieved Context:
 {context}
 
 User Question:
-{question}
+{user_query}
 
 Answer:
 """
 
-    response = requests.post(
-        "http://localhost:11434/api/generate",
-        json={
-            "model": "llama3.2:1b",
-            "prompt": prompt,
-            "stream": False
-        }
+    bot_response = call_ollama(prompt)
+
+    lead_type = classify_lead_with_llm(user_query)
+    extracted_details = extract_details_with_llm(user_query)
+
+    save_to_csv(
+        user_query,
+        lead_type,
+        extracted_details,
+        bot_response
     )
 
-    return response.json()["response"]
+    update_memory(user_query, bot_response)
+
+    return lead_type, extracted_details, bot_response
 
 
-# Step 9: Simple terminal chat
-print("\nCustomer Service RAG Chatbot with Lead Qualification is ready.")
+print("\nCustomer Service RAG Chatbot with Persistent VectorDB, LLM Lead Qualification, and Memory is ready.")
 print("Type 'exit' to stop.\n")
 
 while True:
@@ -206,16 +200,7 @@ while True:
         print("Chatbot stopped.")
         break
 
-    answer = ask_chatbot(user_question)
-    lead_type = classify_lead(user_question)
-    extracted_details = extract_details(user_question)
-
-    save_to_csv(
-        user_question,
-        lead_type,
-        extracted_details,
-        answer
-    )
+    lead_type, extracted_details, answer = ask_chatbot(user_question)
 
     print("\nLead Type:")
     print(lead_type)
