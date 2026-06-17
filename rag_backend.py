@@ -13,7 +13,6 @@ MAX_HISTORY = 6
 
 conversation_history = []
 
-
 # Load embedding model
 embedding_model = SentenceTransformer("all-MiniLM-L6-v2")
 
@@ -45,6 +44,42 @@ def retrieve_context(question, top_k=3):
 
     retrieved_chunks = results["documents"][0]
     return "\n\n".join(retrieved_chunks)
+
+
+def classify_lead_with_llm(user_query):
+    prompt = f"""
+You are a strict lead classification assistant.
+
+Classify the user query into exactly one category.
+
+Important priority rule:
+If the query is about password, login, refund, return, order tracking, delivery, damaged item, payment issue, app issue, website issue, or technical help, classify it as Support Query.
+
+Categories:
+Hot Lead: Strong buying intent, asks for purchase, quote, demo, pricing, subscription, sales contact, or business requirement.
+Warm Lead: Interested or exploring options but not ready to buy.
+Cold Lead: Casual browsing or vague interest.
+Support Query: Existing customer support issue or help request.
+
+User Query:
+{user_query}
+
+Return only one label:
+Hot Lead
+Warm Lead
+Cold Lead
+Support Query
+"""
+
+    result = call_ollama(prompt)
+
+    valid_labels = ["Support Query", "Hot Lead", "Warm Lead", "Cold Lead"]
+
+    for label in valid_labels:
+        if label.lower() in result.lower():
+            return label
+
+    return "Support Query"
 
 
 def extract_details_with_llm(user_query):
@@ -213,3 +248,4 @@ while True:
 
     print("\nSaved to lead_queries.csv")
     print("-" * 80)
+
